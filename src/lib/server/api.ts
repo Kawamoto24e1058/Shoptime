@@ -508,40 +508,108 @@ export async function analyzeWithGeminiBatch(stores: any[], isDrinkingMode: bool
 ${JSON.stringify(storesToAnalyze, null, 2)}
 `;
 
+
 	try {
-		console.log(`Sending batch request to Gemini 2.5 Flash for ${storesToAnalyze.length} stores...`);
+		console.log(`Sending throttled batch request to Gemini 2.5 Flash for ${storesToAnalyze.length} stores...`);
 
-		const generate = async () => {
-			const result = await model.generateContent(prompt);
-			return JSON.parse(result.response.text());
-		};
+		// API負荷対策: 5件ずつチャンクに分割して300ms間隔で実行
+		const CHUNK_SIZE = 5;
+		const CHUNK_DELAY_MS = 300;
 
-		let data;
-		try {
-			data = await generate();
-		} catch (e: any) {
-			if (e.toString().includes('429') || e.toString().includes('Quota')) {
-				console.warn('Gemini 429 Quota Exceeded. Retrying in 12s...');
-				await new Promise(resolve => setTimeout(resolve, 12000));
-				data = await generate();
-			} else {
-				throw e;
+		const chunks: any[][] = [];
+		for (let i = 0; i < storesToAnalyze.length; i += CHUNK_SIZE) {
+			chunks.push(storesToAnalyze.slice(i, i + CHUNK_SIZE));
+		}
+
+		console.log(`Split into ${chunks.length} chunks of max ${CHUNK_SIZE} stores each`);
+
+		let allData: any[] = [];
+
+		for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++) {
+			const chunk = chunks[chunkIndex];
+			console.log(`Processing chunk ${chunkIndex + 1}/${chunks.length} (${chunk.length} stores)...`);
+
+			const chunkPrompt = `
+あなたは「信頼できるグルメ・コンシェルジュ」です。
+ユーザーのために、リストのお店が「2軒目利用」や「飲み会」に適しているか、また「一般的な食事」に適しているかを総合的に評価してください。
+**必ず日本語で回答してください。**
+
+【評価基準】
+1. **飲み適性 (drinking_score 1.0-5.0)**:
+   - お酒の種類（ビール、ワイン、日本酒など）が豊富か。
+   - "飲み"の雰囲気があるか（カウンター、落ち着いた照明など）。
+   - 2軒目として利用しやすいか。
+   - チェーン店は低めに設定(3.0以下)。
+   - 【地元スコア】レビューに「地元の名店」「隠れ家」「教えたくない」等の記述があれば、drinking_score を 4.5以上に引き上げてください。
+2. **総合スコア (score 1.0-5.0)**:
+   - 店舗の総合的な魅力、料理の質、接客など。
+   - 個人経営店や隠れ家的な店を優遇。
+   - 大手チェーン店は原則 3.0-3.5 程度に抑えてください。
+
+
+
+【出力フォーマット (JSON配列)】
+[
+  {
+    "id": "店舗ID",
+    "alcohol_status": "お酒の特徴 (例: 🍺クラフトビール充実)",
+    "alcohol_note": "お酒好きへのアピール点",
+    "hero_feature": "店の最大のウリ",
+    "ai_insight": "独自の推薦コメント (100文字程度)",
+    "best_for": "利用シーン (例: デート / 2軒目 / ファミリー)",
+    "mood": "雰囲気",
+    "score": 4.5,
+    "drinking_score": 4.8, 
+    "recommendedMenu": "おすすめメニュー",
+    "hasAlcohol": true,
+    "tags": ["2軒目向き", "飲み放題", "個室", "静か"]
+  }
+]
+
+【分析対象店舗リスト】
+${JSON.stringify(chunk, null, 2)}
+`;
+
+			const generate = async () => {
+				const result = await model.generateContent(chunkPrompt);
+				return JSON.parse(result.response.text());
+			};
+
+			let chunkData;
+			try {
+				chunkData = await generate();
+			} catch (e: any) {
+				if (e.toString().includes('429') || e.toString().includes('Quota')) {
+					console.warn(`Gemini 429 Quota Exceeded on chunk ${chunkIndex + 1}. Retrying in 12s...`);
+					await new Promise(resolve => setTimeout(resolve, 12000));
+					chunkData = await generate();
+				} else {
+					throw e;
+				}
+			}
+
+			// チャンクデータを統合
+			if (Array.isArray(chunkData)) {
+				allData = allData.concat(chunkData);
+			} else if (chunkData.results && Array.isArray(chunkData.results)) {
+				allData = allData.concat(chunkData.results);
+			}
+
+			// 次のチャンクまで待機 (最後のチャンク以外)
+			if (chunkIndex < chunks.length - 1) {
+				console.log(`Waiting ${CHUNK_DELAY_MS}ms before next chunk...`);
+				await new Promise(resolve => setTimeout(resolve, CHUNK_DELAY_MS));
 			}
 		}
 
+		console.log(`All chunks processed. Total results: ${allData.length}`);
+
 		const resultMap: Record<string, AIAnalysis> = {};
-		if (Array.isArray(data)) {
-			data.forEach((item: any) => {
-				resultMap[item.id] = item;
-				// Cache the result
-				aiCache.set(item.id, item);
-			});
-		} else if (data.results) {
-			data.results.forEach((item: any) => {
-				resultMap[item.id] = item;
-				aiCache.set(item.id, item);
-			});
-		}
+		allData.forEach((item: any) => {
+			resultMap[item.id] = item;
+			// Cache the result
+			aiCache.set(item.id, item);
+		});
 		return resultMap;
 	} catch (error: any) {
 		console.error('Error in analyzeWithGeminiBatch:', error);
@@ -733,24 +801,57 @@ export async function getBasicStores(lat: number, lng: number, isDrinkingMode: b
 		// 食事メインの大手チェーン (飲み利用の優先度を下げる・UX向上のため制限)
 		const fastFoodChains = /すき家|マクドナルド|マック|吉野家|松屋|やよい軒|大戸屋|サイゼリヤ|ガスト|ココス|モスバーガー|ケンタッキー|ミスタードーナツ|CoCo壱番屋|かつや|てんや|はま寿司|スシロー|くら寿司|かっぱ寿司|丸亀製麺|日高屋|餃子の王将|大阪王将|スターバックス|ドトール|タリーズ/;
 
-		const chains = filteredPlaces.filter(p => fastFoodChains.test(p.place.displayName?.text || ''));
-		const independents = filteredPlaces.filter(p => !fastFoodChains.test(p.place.displayName?.text || ''));
+		// 飲みモード時: お酒を提供しないカテゴリを厳格に除外
+		let candidatePlaces = filteredPlaces;
+		if (isDrinkingMode) {
+			const nonAlcoholCategories = /カフェ|ベーカリー|ファストフード|ハンバーガー|牛丼|回転寿司/;
+			const beforeCount = candidatePlaces.length;
+			candidatePlaces = candidatePlaces.filter(p => {
+				const category = determineCategory(p.place.types, p.place.displayName?.text || '');
+				return !nonAlcoholCategories.test(category);
+			});
+			console.log(`[Drinking Mode] Non-alcohol category filter: ${beforeCount} -> ${candidatePlaces.length} places`);
+		}
 
-		// チェーンは最大 20% (例: 9件)に制限 (より厳格に)
+		// チェーン店率の調整 (全モード共通で適用)
+		const chains = candidatePlaces.filter(p => fastFoodChains.test(p.place.displayName?.text || ''));
+		const independents = candidatePlaces.filter(p => !fastFoodChains.test(p.place.displayName?.text || ''));
 
-		const maxItems = 45; // AI分析リクエスト数
-		const maxChains = Math.floor(maxItems * 0.2);
-		const selectedChains = chains.slice(0, maxChains);
-		const selectedIndependents = independents.slice(0, maxItems - selectedChains.length);
+		// API負荷対策: 表示は20件、AI詳細解析は評価順TOP3のみ
+		const maxDisplayItems = 20; // 画面表示用
+		const maxAIAnalysisItems = 3; // Gemini解析用（超厳格）
+		const maxChains = Math.floor(maxDisplayItems * 0.2); // 20% = 4件
 
-		// マージして距離順に再ソート
+		// 評価順にソート (高い順)
+		const sortByRating = (list: { place: PlaceData, remainingMinutes: number }[]) => {
+			return list.sort((a, b) => {
+				const ratingA = a.place.rating || 0;
+				const ratingB = b.place.rating || 0;
+				if (ratingB !== ratingA) return ratingB - ratingA; // 評価が高い順
+				// 評価が同じ場合は距離で比較
+				const distA = calculateDistance(lat, lng, a.place.location!.latitude, a.place.location!.longitude);
+				const distB = calculateDistance(lat, lng, b.place.location!.latitude, b.place.location!.longitude);
+				return distA - distB;
+			});
+		};
+
+		const sortedChains = sortByRating(chains);
+		const sortedIndependents = sortByRating(independents);
+
+		const selectedChains = sortedChains.slice(0, maxChains);
+		const selectedIndependents = sortedIndependents.slice(0, maxDisplayItems - selectedChains.length);
+
+		// マージして距離順に再ソート (UI表示用)
 		const targetPlaces = [...selectedIndependents, ...selectedChains].sort((a, b) => {
 			const distA = calculateDistance(lat, lng, a.place.location!.latitude, a.place.location!.longitude);
 			const distB = calculateDistance(lat, lng, b.place.location!.latitude, b.place.location!.longitude);
 			return distA - distB;
 		});
 
-		console.log(`Targeting ${targetPlaces.length} places for AI analysis`);
+		console.log(`Targeting ${targetPlaces.length} places for display (Top ${maxAIAnalysisItems} will get AI analysis)`);
+
+		// AI解析を受ける上位5件をマーク
+		const placesNeedingAI = new Set(targetPlaces.slice(0, maxAIAnalysisItems).map(p => p.place.id));
 
 		// 3. RecommendedStoreの初期構造を作成
 		const basicStores: RecommendedStore[] = targetPlaces.map(({ place, remainingMinutes }) => {
@@ -826,8 +927,9 @@ export async function getBasicStores(lat: number, lng: number, isDrinkingMode: b
 export async function fillAIAnalysis(stores: RecommendedStore[], originalPlaces: PlaceData[], isDrinkingMode: boolean = false): Promise<RecommendedStore[]> {
 	console.log('Starting Batch AI analysis...');
 
-	// 1. Prepare data for batch processing
-	const storesToAnalyze = stores.map(store => {
+	// API節約: 上位3件のみをAI解析対象とする（超厳格モード）
+	const MAX_AI_ANALYSIS = 3;
+	const storesToAnalyze = stores.slice(0, MAX_AI_ANALYSIS).map(store => {
 		const originalPlace = originalPlaces.find(p => p.id === store.id);
 		const recentReviews = (originalPlace?.reviews || []).slice(0, 3);
 		const reviewsText = recentReviews
@@ -873,11 +975,15 @@ export async function fillAIAnalysis(stores: RecommendedStore[], originalPlaces:
 					// Keep original values and new contact info
 				};
 			} else {
-				// Fallback / No analysis
+				// Fallback: Top5以外はテンプレート生成
+				const templateInsight = `人気の${store.category}です。評価は★${store.rating.toFixed(1)}で、${store.formattedDistance}の場所にあります。`;
 				return {
 					...store,
-					hero_feature: 'データ不足',
-					ai_insight: '分析できませんでした（レビュー不足など）'
+					hero_feature: `★${store.rating.toFixed(1)}`,
+					ai_insight: templateInsight,
+					best_for: '詳細はレビューをご確認ください',
+					alcohol_status: '基本情報',
+					score: store.rating // Use Google rating as fallback score
 				};
 			}
 		});
