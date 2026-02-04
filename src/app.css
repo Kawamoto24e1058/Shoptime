@@ -1,0 +1,22 @@
+@import "tailwindcss";
+
+/* Custom base styles */
+/*
+@layer base {
+    body {
+        @apply bg-slate-50 text-slate-900;
+    }
+}
+*/
+
+/* Custom utilities */
+/*
+.scrollbar-hide::-webkit-scrollbar {
+    display: none;
+}
+
+.scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
+*/
