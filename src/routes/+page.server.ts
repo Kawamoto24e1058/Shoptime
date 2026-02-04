@@ -12,8 +12,6 @@ export const load: PageServerLoad = async ({ url }) => {
         const latParam = url.searchParams.get('lat');
         const lngParam = url.searchParams.get('lng');
         const isDrinkingMode = url.searchParams.get('drunk') === '1';
-        // keyword removed
-
 
         // 1. 座標が直接指定されている場合 (現在地ボタンまたはオートコンプリート)
         if (latParam && lngParam) {
@@ -48,26 +46,14 @@ export const load: PageServerLoad = async ({ url }) => {
 
         console.log(`Loading stores for: ${locationName} (${latitude}, ${longitude})`);
 
-        // 1. データ取得の完全非同期化 (No await)
-        const basicDataPromise = getBasicStores(latitude, longitude, isDrinkingMode, undefined, locationName);
+        // 1. まず基本情報を取得（awaitする）
+        const { basicStores, originalPlaces } = await getBasicStores(latitude, longitude, isDrinkingMode, locationName);
 
-        // 2. AI分析も非同期チェーン
-        const aiPromise = basicDataPromise.then(({ basicStores, originalPlaces }) => {
-            // Memory Protection: Limit to Top 15 for AI
-            const topStores = basicStores.slice(0, 15);
-            const topPlaces = originalPlaces.filter(p => topStores.some(s => s.id === p.id));
-
-            return Promise.race([
-                fillAIAnalysis(topStores, topPlaces, isDrinkingMode),
-                new Promise<any[]>((resolve) => setTimeout(() => resolve([]), 10000))
-            ]);
-        });
-
+        // 2. AI分析はPromiseとして返す（awaitしない）
         return {
-            stores: [], // SSR用は空にして即レスポンス
+            stores: basicStores,
             streamed: {
-                stores: basicDataPromise.then(data => data.basicStores),
-                aiAnalyses: aiPromise
+                aiAnalyses: fillAIAnalysis(basicStores, originalPlaces, isDrinkingMode)
             },
             location: {
                 name: locationName,

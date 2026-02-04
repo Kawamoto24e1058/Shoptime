@@ -1,7 +1,6 @@
 import { GOOGLE_MAPS_API_KEY } from '$env/static/private';
 import { env } from '$env/dynamic/private';
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
-import { aiCache, type AIAnalysis } from './cache';
 
 // ========================================
 // 型定義
@@ -56,8 +55,6 @@ export interface PlaceData {
 	websiteUri?: string; // New
 	photos?: { name: string; widthPx?: number; heightPx?: number; }[]; // New
 	editorialSummary?: { text?: string }; // New
-	takeout?: boolean; // New (Official)
-	reservable?: boolean; // New (Official)
 }
 
 export interface RecommendedStore {
@@ -88,47 +85,39 @@ export interface RecommendedStore {
 	photoName?: string; // New
 	drinking_score: number; // New: 飲みモード用スコア
 	reviewsText?: string; // New: クライアントサイド検索用 (レビュー全文結合)
-	hasTakeout?: boolean; // New
-	editorialSummary?: { text: string }; // New
-	location?: { latitude: number; longitude: number }; // New: For map integration
 }
 
-// In-memory cache for AI analysis: Imported from ./cache
-
-// ========================================
-// Helper Functions
-// ========================================
-
-async function fetchWithRetry(url: string, options: RequestInit, retries = 2): Promise<Response> {
-	for (let i = 0; i <= retries; i++) {
-		try {
-			// 10s Timeout
-			const signal = AbortSignal.timeout(10000);
-			const response = await fetch(url, { ...options, signal });
-
-			if (response.ok) return response;
-
-			// Handle 429 (Too Many Requests) - FAIL FAST (No Retry)
-			if (response.status === 429) {
-				console.warn('Request 429 (Quota Exceeded). Fail fast.');
-				// Return a dummy 429 response that caller can handle, or throw.
-				// Here we return the response so the caller sees !ok and handles it.
-				return response;
-			}
-
-			// Other errors: immediately throw/return to avoid infinite wait
-			if (i === retries) return response;
-
-		} catch (e: any) {
-			if (i === retries) throw e;
-			console.warn(`Fetch error (${e.message}). Retrying...`);
-		}
-	}
-	throw new Error('Fetch failed after retries');
+interface AIAnalysis {
+	alcohol_status: string;
+	alcohol_note: string; // New
+	hero_feature: string; // New
+	ai_insight: string;
+	best_for: string;
+	lo_risk: string;
+	mood: string;
+	score: number; // New
+	recommendedMenu: string; // New
+	hasAlcohol: boolean; // New
+	tags: string[]; // New
+	drinking_score: number; // New
 }
+
+// In-memory cache for AI analysis
+const aiCache = new Map<string, AIAnalysis>();
+
+// ========================================
+// Google Places API (New) - 周辺店舗検索
+// ========================================
+
+// ========================================
+// Google Places API (New) - 周辺店舗検索
+// ========================================
 
 /**
- * Google Places API - テキスト検索 (New)
+ * Text Search API を使用して、指定したキーワード周辺の飲食店を取得
+ */
+/**
+ * Text Search API を使用して、指定したキーワード周辺の飲食店を取得
  */
 async function fetchPlacesByText(lat: number, lng: number, query: string, radius: number = 1500): Promise<PlaceData[]> {
 	try {
@@ -147,15 +136,15 @@ async function fetchPlacesByText(lat: number, lng: number, query: string, radius
 					radius: radius
 				}
 			},
-			openNow: true,
+			openNow: true, // 営業中のみ取得 (API側でフィルタリング)
 		};
 
-		const response = await fetchWithRetry(url, {
+		const response = await fetch(url, {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
 				'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
-				'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.currentOpeningHours,places.reviews,places.priceLevel,places.types,places.googleMapsUri,places.rating,places.location,places.nationalPhoneNumber,places.websiteUri,places.editorialSummary,places.takeout,places.reservable'
+				'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.currentOpeningHours,places.reviews,places.priceLevel,places.types,places.googleMapsUri,places.rating,places.location,places.nationalPhoneNumber,places.websiteUri,places.editorialSummary'
 			},
 			body: JSON.stringify(requestBody)
 		});
@@ -166,31 +155,7 @@ async function fetchPlacesByText(lat: number, lng: number, query: string, radius
 		}
 
 		const data = await response.json();
-
-		// Memory Optimization: Strip unnecessary data immediately
-		if (!data.places) return [];
-
-		return data.places.map((p: any) => ({
-			id: p.id,
-			displayName: p.displayName,
-			formattedAddress: p.formattedAddress,
-			currentOpeningHours: p.currentOpeningHours,
-			reviews: p.reviews, // AI analysis needs this
-			priceLevel: p.priceLevel,
-			types: p.types,
-			googleMapsUri: p.googleMapsUri,
-			rating: p.rating,
-			location: p.location,
-			nationalPhoneNumber: p.nationalPhoneNumber,
-			websiteUri: p.websiteUri,
-			editorialSummary: p.editorialSummary,
-			takeout: p.takeout,
-			reservable: p.reservable,
-			// Exclude html_attributions, photos (large metadata), etc if not strictly needed
-			// Keep photo name only
-			photos: p.photos ? p.photos.map((ph: any) => ({ name: ph.name })) : []
-		}));
-
+		return data.places || [];
 	} catch (error) {
 		console.error(`Error fetching places by text "${query}":`, error);
 		return [];
@@ -379,7 +344,7 @@ function filterByClosingTime(places: PlaceData[]): Array<{ place: PlaceData; rem
 	// 週の開始（日曜00:00）からの経過分数
 	const currentWeekMinutes = getMinutesFromStartOfWeek(currentDay, currentJST.getHours(), currentJST.getMinutes());
 
-	// console.log(`[Debug] Filtering start. Current JST: ${currentJST.toLocaleString('ja-JP')} (WeekMin: ${currentWeekMinutes})`);
+	console.log(`[Debug] Filtering start. Current JST: ${currentJST.toLocaleString('ja-JP')} (WeekMin: ${currentWeekMinutes})`);
 
 	for (const place of places) {
 		const oh = place.currentOpeningHours;
@@ -450,7 +415,7 @@ function filterByClosingTime(places: PlaceData[]): Array<{ place: PlaceData; rem
 					filtered.push({ place, remainingMinutes: minRemaining });
 				}
 			} else {
-				// console.log(`[Debug] Dropping ${name}: Closing soon (${minRemaining} mins < ${threshold} mins threshold). Chain: ${isChain}`);
+				console.log(`[Debug] Dropping ${name}: Closing soon (${minRemaining} mins < ${threshold} mins threshold). Chain: ${isChain}`);
 			}
 		} else {
 			// openNow=true だが period ロジックで閉まっていると判定された場合
@@ -458,7 +423,7 @@ function filterByClosingTime(places: PlaceData[]): Array<{ place: PlaceData; rem
 			// 閉店時間が計算できないと "あと何分" が出せないので、一応除外するか、
 			// 閉店時間を "不明" として通すか。
 			// 安全のため除外 (閉店ギリギリの可能性が高い)
-			// console.log(`[Debug] Dropping ${place.displayName?.text}: OpenNow=true but no closing time calculated.`);
+			console.log(`[Debug] Dropping ${place.displayName?.text}: OpenNow=true but no closing time calculated.`);
 		}
 	}
 
@@ -471,7 +436,6 @@ function filterByClosingTime(places: PlaceData[]): Array<{ place: PlaceData; rem
 
 /**
  * 複数の店舗情報をまとめてGeminiに送信し、一括で分析を行う
- * (5件ずつのチャンクに分割して順次処理)
  */
 export async function analyzeWithGeminiBatch(stores: any[], isDrinkingMode: boolean = false): Promise<Record<string, AIAnalysis>> {
 	if (stores.length === 0) return {};
@@ -490,6 +454,8 @@ export async function analyzeWithGeminiBatch(stores: any[], isDrinkingMode: bool
 	}
 
 	const apiKey = env.GEMINI_API_KEY || GOOGLE_MAPS_API_KEY;
+	console.log("Using API Key (SDK):", apiKey ? `Set` : "Not Set");
+
 	const genAI = new GoogleGenerativeAI(apiKey);
 	const model = genAI.getGenerativeModel({
 		model: "gemini-2.5-flash",
@@ -498,16 +464,10 @@ export async function analyzeWithGeminiBatch(stores: any[], isDrinkingMode: bool
 		}
 	});
 
-	// 結果を格納するマップ
-	const resultMap: Record<string, AIAnalysis> = {};
 
-	// 5件ずつのチャンクに分割して処理
-	const chunkSize = 5;
-	for (let i = 0; i < storesToAnalyze.length; i += chunkSize) {
-		const chunk = storesToAnalyze.slice(i, i + chunkSize);
 
-		// 統合プロンプト: 通常・飲みモードの両方を一度に判定
-		const prompt = `
+	// 統合プロンプト: 通常・飲みモードの両方を一度に判定
+	const prompt = `
 あなたは「信頼できるグルメ・コンシェルジュ」です。
 ユーザーのために、リストのお店が「2軒目利用」や「飲み会」に適しているか、また「一般的な食事」に適しているかを総合的に評価してください。
 **必ず日本語で回答してください。**
@@ -523,6 +483,8 @@ export async function analyzeWithGeminiBatch(stores: any[], isDrinkingMode: bool
    - 店舗の総合的な魅力、料理の質、接客など。
    - 個人経営店や隠れ家的な店を優遇。
    - 大手チェーン店は原則 3.0-3.5 程度に抑えてください。
+
+
 
 【出力フォーマット (JSON配列)】
 [
@@ -543,49 +505,72 @@ export async function analyzeWithGeminiBatch(stores: any[], isDrinkingMode: bool
 ]
 
 【分析対象店舗リスト】
-${JSON.stringify(chunk, null, 2)}
+${JSON.stringify(storesToAnalyze, null, 2)}
 `;
 
+	try {
+		console.log(`Sending batch request to Gemini 2.5 Flash for ${storesToAnalyze.length} stores...`);
+
+		const generate = async () => {
+			const result = await model.generateContent(prompt);
+			return JSON.parse(result.response.text());
+		};
+
+		let data;
 		try {
-			const generate = async () => {
-				const result = await model.generateContent(prompt);
-				return JSON.parse(result.response.text());
-			};
-
-			let data;
-			try {
+			data = await generate();
+		} catch (e: any) {
+			if (e.toString().includes('429') || e.toString().includes('Quota')) {
+				console.warn('Gemini 429 Quota Exceeded. Retrying in 12s...');
+				await new Promise(resolve => setTimeout(resolve, 12000));
 				data = await generate();
-			} catch (e: any) {
-				if (e.toString().includes('429') || e.toString().includes('Quota')) {
-					await new Promise(resolve => setTimeout(resolve, 5000));
-					data = await generate();
-				} else {
-					throw e;
-				}
+			} else {
+				throw e;
 			}
-
-			if (Array.isArray(data)) {
-				data.forEach((item: any) => {
-					resultMap[item.id] = item;
-					aiCache.set(item.id, item);
-				});
-			} else if (data.results) {
-				data.results.forEach((item: any) => {
-					resultMap[item.id] = item;
-					aiCache.set(item.id, item);
-				});
-			}
-		} catch (error: any) {
-			// チャンク単位で失敗しても続行
-			// エラーログは削除（高負荷防止）
 		}
 
-		// 連続リクエストを防ぐための短い待機
-		await new Promise(resolve => setTimeout(resolve, 1000));
-	}
+		const resultMap: Record<string, AIAnalysis> = {};
+		if (Array.isArray(data)) {
+			data.forEach((item: any) => {
+				resultMap[item.id] = item;
+				// Cache the result
+				aiCache.set(item.id, item);
+			});
+		} else if (data.results) {
+			data.results.forEach((item: any) => {
+				resultMap[item.id] = item;
+				aiCache.set(item.id, item);
+			});
+		}
+		return resultMap;
+	} catch (error: any) {
+		console.error('Error in analyzeWithGeminiBatch:', error);
 
-	return { ...cachedResults, ...resultMap };
+		// 429エラー等の場合、フォールバックとして基本情報のみの分析結果を返す
+		// これにより、AI分析ができなくても店舗リスト自体は表示できる
+		const fallbackMap: Record<string, AIAnalysis> = {};
+
+		storesToAnalyze.forEach((s: any) => {
+			fallbackMap[s.id] = {
+				score: 3.0,
+				drinking_score: 0,
+				ai_insight: "現在アクセス集中によりAI詳細分析をスキップしています。\n基本情報をご確認ください。",
+				alcohol_status: "不明",
+				alcohol_note: "",
+				hero_feature: "基本情報のみ表示",
+				best_for: "不明",
+				lo_risk: "不明",
+				mood: "不明",
+				recommendedMenu: "",
+				hasAlcohol: false,
+				tags: ["情報取得中"]
+			};
+		});
+		return fallbackMap;
+	}
 }
+
+// REMOVED deprecated analyzeWithGemini function to avoid SDK dependency errors.
 
 // ========================================
 // カテゴリ判定
@@ -626,7 +611,7 @@ function determineCategory(types: string[] = [], name: string = ''): string {
 
 	if (!types || types.length === 0) return 'その他';
 
-	// 2. 詳細なタイプを優先 (1:1 Mapping)
+	// 2. 詳細なタイプを優先
 	if (types.includes('ramen_restaurant')) return 'ラーメン';
 	if (types.includes('sushi_restaurant')) return '寿司';
 	if (types.includes('yakiniku_restaurant')) return '焼肉';
@@ -634,21 +619,20 @@ function determineCategory(types: string[] = [], name: string = ''): string {
 	if (types.includes('french_restaurant')) return 'フレンチ';
 	if (types.includes('chinese_restaurant')) return '中華';
 	if (types.includes('japanese_restaurant')) return '和食';
-	if (types.includes('izakaya_restaurant')) return '居酒屋';
-	if (types.includes('bar') || types.includes('night_club') || types.includes('pub')) return 'バー';
-	if (types.includes('cafe') || types.includes('coffee_shop')) return 'カフェ';
+	if (types.includes('izakaya_restaurant')) return '居酒屋'; // 存在する場合
 	if (types.includes('fast_food_restaurant')) return 'ファストフード';
 	if (types.includes('hamburger_restaurant')) return 'ハンバーガー';
 	if (types.includes('steak_house')) return 'ステーキ';
 	if (types.includes('seafood_restaurant')) return '海鮮';
-	if (types.includes('bakery')) return 'ベーカリー';
-	if (types.includes('meal_takeaway')) return 'テイクアウト';
 
 	// 3. 一般的なカテゴリ
+	if (types.includes('bar') || types.includes('night_club') || types.includes('pub')) return '居酒屋・バー';
+	if (types.includes('cafe') || types.includes('coffee_shop')) return 'カフェ';
+	if (types.includes('bakery')) return 'ベーカリー';
+	if (types.includes('meal_takeaway')) return 'テイクアウト';
 	if (types.includes('restaurant')) return 'レストラン';
-	if (types.includes('food')) return 'その他';
 
-	return 'その他';
+	return 'レストラン';
 }
 
 /**
@@ -674,51 +658,37 @@ function calculateDistance(lat1: number, lng1: number, lat2: number, lng2: numbe
 // データ取得と分析の分離
 // ========================================
 
-// Server Execution Lock
-let isServerBusy = false;
-
 /**
  * 1. 基本的な店舗情報の取得とフィルタリング
  */
-export async function getBasicStores(lat: number, lng: number, isDrinkingMode: boolean = false, _unused?: string, locationName?: string): Promise<{ basicStores: RecommendedStore[], originalPlaces: PlaceData[] }> {
-	if (isServerBusy) {
-		console.warn('Server is busy with another request. Skipping execution.');
-		return { basicStores: [], originalPlaces: [] };
-	}
-
-	isServerBusy = true;
+export async function getBasicStores(lat: number, lng: number, isDrinkingMode: boolean = false, locationName?: string): Promise<{ basicStores: RecommendedStore[], originalPlaces: PlaceData[] }> {
 	try {
 		console.log(`Searching stores near (${lat}, ${lng}) [Location: ${locationName}]...`);
 
 		// 1. Places API で周辺の店舗を取得
-		// 1. Places API で周辺の店舗を取得
-		let queries: string[] = ["飲食店", "レストラン", "ランチ", "ディナー"]; // Base queries
+		let queries: string[] = [];
+		const searchRadius = 1500;
 
-		const searchRadius = 1500; // Strict 1.5km limit for all modes
-
-		// Mode-specific queries
-		if (isDrinkingMode) {
-			console.log("Drinking Mode: ON - Adding alcohol-related queries");
-			queries.push("居酒屋", "バー", "バル", "深夜営業", "Pub", "ダイニングバー");
-		} else {
-			// Normal mode specific
-			queries.push("カフェ", "ラーメン", "定食", "中華", "イタリアン", "焼肉");
-		}
+		// 統合クエリ: 通常・飲みモードの両方をカバー
+		queries = ["飲食店", "居酒屋", "バー", "深夜営業", "カフェ", "ラーメン", "中華", "焼肉", "イタリアン", "ダイニング", "バル"];
 
 		// 地名がある場合は、隠れ家/個人店クエリを追加 (並列検索で名店を拾う)
 		if (locationName && !locationName.includes("現在地") && !locationName.includes("見つかりません")) {
 			const cleanLoc = locationName.replace("周辺", "").trim();
 			if (cleanLoc.length > 0) {
 				console.log(`Adding local queries for: ${cleanLoc}`);
-				if (isDrinkingMode) {
-					queries.push(`${cleanLoc} 居酒屋 個人店`);
-					queries.push(`${cleanLoc} バー 隠れ家`);
-				} else {
-					queries.push(`${cleanLoc} 美味しい店`);
-					queries.push(`${cleanLoc} ランチ 人気`);
-				}
+				queries.push(`${cleanLoc} 居酒屋 個人店`);
+				queries.push(`${cleanLoc} バー 隠れ家`);
+				queries.push(`${cleanLoc} 焼肉 名店`);
+				queries.push(`${cleanLoc} 美味しい店`);
 			}
 		}
+
+		// 検索半径 (飲みモード: 1500m, 通常: 1000m)
+		// ユーザー要望により厳格に1.5kmを適用
+		// 検索半径 (飲みモード: 1500m, 通常: 1000m)
+		// ユーザー要望により厳格に1.5kmを適用
+		// const searchRadius = 1500; // Removed duplicate
 
 		// 並列実行
 		const promises = queries.map(q => fetchPlacesByText(lat, lng, q, searchRadius));
@@ -768,7 +738,6 @@ export async function getBasicStores(lat: number, lng: number, isDrinkingMode: b
 
 		// チェーンは最大 20% (例: 9件)に制限 (より厳格に)
 
-
 		const maxItems = 45; // AI分析リクエスト数
 		const maxChains = Math.floor(maxItems * 0.2);
 		const selectedChains = chains.slice(0, maxChains);
@@ -783,19 +752,8 @@ export async function getBasicStores(lat: number, lng: number, isDrinkingMode: b
 
 		console.log(`Targeting ${targetPlaces.length} places for AI analysis`);
 
-		// Filter out non-food places BEFORE creating RecommendedStore
-		const excludedTypes = [
-			'pharmacy', 'drugstore', 'convenience_store', 'dentist', 'gym', 'school', 'atm', 'bank', 'post_office',
-			'lodging', 'gas_station', 'hospital', 'park', 'police', 'doctor', 'clothing_store', 'electronics_store',
-			'shoe_store', 'book_store', 'hair_care', 'hardware_store', 'furniture_store', 'car_dealer'
-		];
-		const finalPlaces = targetPlaces.filter(({ place }) => {
-			if (!place.types) return true;
-			return !place.types.some(t => excludedTypes.includes(t));
-		});
-
 		// 3. RecommendedStoreの初期構造を作成
-		const basicStores: RecommendedStore[] = finalPlaces.map(({ place, remainingMinutes }) => {
+		const basicStores: RecommendedStore[] = targetPlaces.map(({ place, remainingMinutes }) => {
 			// Calculate distance using the request origin (lat, lng)
 			// Note: This is straight-line distance (Haversine).
 			// Places API (New) searchNearby does not return routing distance.
@@ -806,7 +764,7 @@ export async function getBasicStores(lat: number, lng: number, isDrinkingMode: b
 
 			// Debug for distance (first few)
 			if (targetPlaces.indexOf({ place, remainingMinutes }) < 3) {
-				// console.log(`[Debug] Distance...`);
+				console.log(`[Debug] Distance for ${place.displayName?.text}: ${distance} m(Origin: ${lat}, ${lng} -> Store: ${place.location?.latitude}, ${place.location?.longitude})`);
 			}
 
 			// Format distance
@@ -848,49 +806,7 @@ export async function getBasicStores(lat: number, lng: number, isDrinkingMode: b
 				phoneNumber: place.nationalPhoneNumber,
 				reservationUrl: place.websiteUri,
 				photoName: photoName,
-				drinking_score: 0, // Init
-				hasTakeout: (() => {
-					// 0. Exclude Non-Food Places (Strict Filter)
-					const excludedTypes = ['pharmacy', 'drugstore', 'convenience_store', 'dentist', 'gym', 'school', 'atm', 'bank', 'post_office'];
-					if (place.types && place.types.some(t => excludedTypes.includes(t))) {
-						// 1.5km logic handles filtering, but we should mark/exclude here or earlier
-						// Since this is mapping RecommendedStore, returning here doesn't remove it from list.
-						// We should filter BEFORE mapping.
-						// However, getBasicStores structure filters AFTER fetching.
-						// I will add a 'deprecated' flag or filter logic in mapping?
-						// Better: Filter 'targetPlaces' BEFORE mapping.
-					}
-
-					// テイクアウト判定ロジック
-					// 1. Official Flag (Priority)
-					if (place.takeout === true) return true;
-
-					const name = displayName;
-					const reviews = place.reviews?.map(r => r.text?.text || "").join(" ") || "";
-					const summary = place.editorialSummary?.text || "";
-					const types = place.types || [];
-
-					// 2. 公式属性 (Google Maps Types)
-					if (types.includes('meal_takeaway')) return true;
-
-					// 3. キーワード判定 (店名・レビュー・説明)
-					const kw = /テイクアウト|持ち帰り|弁当|to go|takeout|お土産/i;
-					if (kw.test(name) || kw.test(reviews) || kw.test(summary)) return true;
-
-					// 4. 指定リスト (ユーザー指定の確実な店)
-					const whiteList = [
-						"桃牛苑",
-						"中華ダイニング 結",
-						"結⭐︎",
-						"ドマーニ",
-						"O.G.O",
-						"いぶき野びーふ亭",
-						"ひまわり"
-					];
-					if (whiteList.some(w => name.includes(w))) return true;
-
-					return false;
-				})()
+				drinking_score: 0 // Init
 			};
 		});
 
@@ -901,8 +817,6 @@ export async function getBasicStores(lat: number, lng: number, isDrinkingMode: b
 	} catch (error) {
 		console.error('Error in getBasicStores:', error);
 		throw error;
-	} finally {
-		isServerBusy = false;
 	}
 }
 
@@ -910,12 +824,7 @@ export async function getBasicStores(lat: number, lng: number, isDrinkingMode: b
  * 2. 店舗リストに対してAI分析を並列実行して埋める
  */
 export async function fillAIAnalysis(stores: RecommendedStore[], originalPlaces: PlaceData[], isDrinkingMode: boolean = false): Promise<RecommendedStore[]> {
-	if (!stores || stores.length === 0) {
-		console.log('No stores to analyze. Skipping AI.');
-		return [];
-	}
-
-	console.log(`Starting Batch AI analysis for ${stores.length} stores...`);
+	console.log('Starting Batch AI analysis...');
 
 	// 1. Prepare data for batch processing
 	const storesToAnalyze = stores.map(store => {
@@ -943,7 +852,7 @@ export async function fillAIAnalysis(stores: RecommendedStore[], originalPlaces:
 	try {
 		// 2. Call Gemini Batch
 		const analysisMap = await analyzeWithGeminiBatch(storesToAnalyze, isDrinkingMode);
-		console.log(`Batch Analysis Completed. Merging ${Object.keys(analysisMap).length} results...`);
+		console.log('Batch Analysis Completed. Merging results...');
 
 		// 3. Merge results
 		return stores.map(store => {
