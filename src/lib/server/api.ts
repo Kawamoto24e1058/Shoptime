@@ -1,5 +1,5 @@
-import { GOOGLE_MAPS_API_KEY } from '$env/static/private';
 import { env } from '$env/dynamic/private';
+const GOOGLE_MAPS_API_KEY = env.GOOGLE_MAPS_API_KEY;
 import { batchFetchCachedAnalysis, saveToNotion } from './notionCache';
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 
@@ -132,6 +132,12 @@ const aiCache = new Map<string, AIAnalysis>();
  */
 async function fetchPlacesByText(lat: number, lng: number, query: string, radius: number = 1500): Promise<PlaceData[]> {
 	try {
+		// Check API Key
+		if (!GOOGLE_MAPS_API_KEY) {
+			console.error('GOOGLE_MAPS_API_KEY is undefined. Check Vercel Environment Variables.');
+			return [];
+		}
+
 		const url = 'https://places.googleapis.com/v1/places:searchText';
 
 		const requestBody = {
@@ -210,6 +216,10 @@ export async function fetchNearbyPlaces(lat: number, lng: number): Promise<Place
  */
 export async function fetchPlaceAutocomplete(input: string, sessionToken?: string): Promise<Array<{ description: string; place_id: string }> | null> {
 	try {
+		if (!GOOGLE_MAPS_API_KEY) {
+			console.error('GOOGLE_MAPS_API_KEY is undefined.');
+			return null;
+		}
 		// types=geocode|establishment を指定して広範囲にヒットさせる
 		let url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?input=${encodeURIComponent(input)}&language=ja&components=country:jp&key=${GOOGLE_MAPS_API_KEY}`;
 		if (sessionToken) {
@@ -243,6 +253,10 @@ export async function fetchPlaceAutocomplete(input: string, sessionToken?: strin
  */
 export async function fetchPlaceDetails(placeId: string, sessionToken?: string): Promise<{ lat: number; lng: number; name: string } | null> {
 	try {
+		if (!GOOGLE_MAPS_API_KEY) {
+			console.error('GOOGLE_MAPS_API_KEY is undefined.');
+			return null;
+		}
 		let url = `https://maps.googleapis.com/maps/api/place/details/json?place_id=${placeId}&fields=name,geometry&key=${GOOGLE_MAPS_API_KEY}`;
 		if (sessionToken) {
 			url += `&sessiontoken=${encodeURIComponent(sessionToken)}`;

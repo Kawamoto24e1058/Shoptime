@@ -1,11 +1,18 @@
 import { Client } from '@notionhq/client';
-import { NOTION_API_KEY, NOTION_DATABASE_ID } from '$env/static/private';
+import { env } from '$env/dynamic/private';
+
+const NOTION_API_KEY = env.NOTION_API_KEY;
+const NOTION_DATABASE_ID = env.NOTION_DATABASE_ID;
 
 // ========================================
 // 1. Client Initialization & Export
 // ========================================
 
-export const notion = new Client({ auth: NOTION_API_KEY });
+export const notion = new Client({ auth: NOTION_API_KEY || "dummy_key_for_build" });
+
+if (!NOTION_API_KEY) {
+    console.warn("[Notion] WARN: NOTION_API_KEY is missing. Notion features will not work.");
+}
 
 // Robust ID handling
 // Allow both 32-char hex and 36-char UUID.
@@ -35,8 +42,8 @@ console.log(`[Notion] Database ID (Used): "${formattedDatabaseId}"`);
  * Batch fetch cached analyses using raw request
  */
 export async function batchFetchCachedAnalysis(placeIds: string[]): Promise<Map<string, any>> {
-    if (!formattedDatabaseId) {
-        console.error('[Notion Cache] No database ID configured');
+    if (!formattedDatabaseId || !NOTION_API_KEY) {
+        console.error('[Notion Cache] No database ID or API Key configured');
         return new Map();
     }
 
@@ -129,8 +136,8 @@ export async function saveToNotion(
 
     // 1. Prepare Target DB ID (Strict 32-char Alphanumeric)
     let targetDbId = formattedDatabaseId;
-    if (!targetDbId) {
-        console.error('[Notion] ❌ Database ID not configured');
+    if (!targetDbId || !NOTION_API_KEY) {
+        console.error('[Notion] ❌ Database ID or API Key not configured');
         return false;
     }
 

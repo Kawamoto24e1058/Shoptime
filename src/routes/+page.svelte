@@ -595,16 +595,16 @@
 										<div class="stars-hero">
 											{"★".repeat(
 												Math.round(
-													store?.googleRating ||
-														store?.rating ||
+													store?.googleRating ??
+														store?.rating ??
 														0,
 												),
 											) +
 												"☆".repeat(
 													5 -
 														Math.round(
-															store?.googleRating ||
-																store?.rating ||
+															store?.googleRating ??
+																store?.rating ??
 																0,
 														),
 												)}
@@ -615,8 +615,8 @@
 												"N/A"}
 										</span>
 										<span class="rating-cnt-hero">
-											({store?.userRatingsTotal ||
-												store?.reviewCount ||
+											({store?.userRatingsTotal ??
+												store?.reviewCount ??
 												0}件)
 										</span>
 									</div>
@@ -643,13 +643,13 @@
 									<div class="comment-section">
 										<p class="store-comment">
 											{#if store?.ai_insight}
-												{@html store.ai_insight
+												{@html store?.ai_insight
 													.split("\n")[0]
 													.substring(0, 80) + "..."}
 											{:else if store?.editorialSummary}
-												{store.editorialSummary}
+												{store?.editorialSummary}
 											{:else if store?.editorial_summary}
-												{store.editorial_summary}
+												{store?.editorial_summary}
 											{:else}
 												<span class="no-comment"
 													>詳細情報はGoogle
@@ -663,7 +663,7 @@
 									<div class="action-buttons-compact">
 										<a
 											href={store?.phoneNumber
-												? `tel:${store.phoneNumber}`
+												? `tel:${store?.phoneNumber}`
 												: undefined}
 											class="action-btn-compact call-btn {store?.phoneNumber
 												? ''
