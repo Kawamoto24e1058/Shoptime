@@ -13,10 +13,22 @@
 		MapPin, // New
 	} from "lucide-svelte";
 
-	let { data }: { data: PageData } = $props();
+	let {
+		data = {
+			location: { name: "Loading...", lat: 0, lng: 0 },
+			stores: [],
+			streamed: { aiAnalyses: Promise.resolve([]) },
+			isDrinkingMode: false,
+		},
+	} = $props();
 
-	// 飲みモード
-	let isDrinkingMode = $state(data.isDrinkingMode || false);
+	// 飲みモード（初期値を$effect外で取得してstate化）
+	let isDrinkingMode = $state(false);
+
+	// 初期値設定（effect内で読み取り）
+	$effect(() => {
+		isDrinkingMode = data.isDrinkingMode || false;
+	});
 
 	// 飲みモード切り替え
 	function toggleDrinkingMode() {
@@ -53,9 +65,36 @@
 		}
 	}
 
-	// 店舗データ（初期値は基本データ、ストリーミング完了後に更新）
-	let stores = $state(data.stores);
-	let isAnalyzing = $state(true);
+	// AI分析済みストアデータ（$effect内で監視）
+	let analysisComplete = $state(false);
+	let analyzedStores = $state<any[]>([]);
+
+	// サーバーからのストリーミングデータを監視
+	$effect(() => {
+		// data参照はeffect内でOK
+		analysisComplete = false;
+		// Ensure data.stores is always an array
+		analyzedStores = Array.isArray(data.stores) ? data.stores : [];
+
+		if (data.streamed && data.streamed.aiAnalyses) {
+			data.streamed.aiAnalyses
+				.then((updated) => {
+					analyzedStores = updated || [];
+					analysisComplete = true;
+				})
+				.catch((err) => {
+					console.error("Analysis stream error:", err);
+					analysisComplete = true;
+				});
+		} else {
+			analysisComplete = true;
+		}
+	});
+
+	// AI分析中かどうか（テンプレート用）
+	const isAnalyzing = $derived(!analysisComplete);
+
+	// ローディングメッセージ管理のみ（storesへの代入を削除）
 	let loadingMessage = $state("AIが最新の口コミを読み込んでいます...");
 
 	const loadingMessages = [
@@ -67,30 +106,29 @@
 		"「必食メニュー」を抽出しています...",
 	];
 
-	// ランダムメッセージのローテーション
+	// ランダムメッセージのローテーション（常に実行）
 	$effect(() => {
-		if (isAnalyzing) {
-			const interval = setInterval(() => {
-				const randomIndex = Math.floor(
-					Math.random() * loadingMessages.length,
-				);
-				loadingMessage = loadingMessages[randomIndex];
-			}, 2500);
-			return () => clearInterval(interval);
-		}
+		const interval = setInterval(() => {
+			const randomIndex = Math.floor(
+				Math.random() * loadingMessages.length,
+			);
+			loadingMessage = loadingMessages[randomIndex];
+		}, 2500);
+		return () => clearInterval(interval);
 	});
 
-	// ストリーミングデータの監視
-	$effect(() => {
-		// 初期ロードやナビゲーション時にリセット
-		isAnalyzing = true;
-		stores = data.stores;
+	// 【修正】自動リフレッシュ（無限ループ防止のため停止）
+	// $effect(() => {
+	// 	if (data.error) return;
 
-		data.streamed.aiAnalyses.then((updatedStores) => {
-			stores = updatedStores;
-			isAnalyzing = false;
-		});
-	});
+	// 	const refreshInterval = setInterval(() => {
+	// 		if (!analysisComplete && !data.error) {
+	// 			invalidateAll();
+	// 		}
+	// 	}, 10000);
+
+	// 	return () => clearInterval(refreshInterval);
+	// });
 
 	// カテゴリリスト
 	const categories = $derived([
@@ -103,26 +141,34 @@
 		"その他",
 	]);
 
-	// フィルタリングとソートが適用された店舗リスト
-	const filteredStores = $derived.by(() => {
+	// フィルタリングとソート関数（storesを引数として受け取る）
+	function filterAndSortStores(allStores: any[]) {
+		if (!Array.isArray(allStores)) return [];
+
 		// 1. Filter
-		let result = stores;
+		let result = allStores.filter(
+			(store) => store !== undefined && store !== null,
+		);
 
 		// Category Filter
 		if (selectedCategory !== "すべて") {
 			result = result.filter(
-				(store) => store.category === selectedCategory,
+				(store: any) => store.category === selectedCategory,
 			);
 		}
 
 		// Drinking Mode Filter
 		if (isDrinkingMode) {
-			result = result.filter((store) => {
+			result = result.filter((store: any) => {
+				if (!store) return false;
+
 				// AI分析完了後: スコアやフラグで判定
 				if (store.drinking_score && store.drinking_score > 0) {
 					return store.drinking_score >= 3.0; // 3.0以上のみ表示
 				}
 				if (store.hasAlcohol) return true;
+
+				if (!store) return false;
 
 				// AI分析前(初期表示): カテゴリや店名で簡易判定
 				// 居酒屋、バー、バル、ダイニング等はOK
@@ -137,18 +183,18 @@
 					"Wine",
 					"Sake",
 				];
-				const categoryMatch = alcoholKeywords.some((k) =>
-					store.category.includes(k),
-				);
-				const nameMatch = alcoholKeywords.some((k) =>
-					store.name.includes(k),
-				);
+				const categoryMatch =
+					store.category &&
+					alcoholKeywords.some((k) => store.category.includes(k));
+				const nameMatch =
+					store.name &&
+					alcoholKeywords.some((k) => store.name.includes(k));
 				return categoryMatch || nameMatch;
 			});
 		}
 
 		// 2. Sort
-		return [...result].sort((a, b) => {
+		return [...result].sort((a: any, b: any) => {
 			if (sortType === "rating") {
 				// 飲みモードなら飲みスコア優先
 				const scoreA = isDrinkingMode
@@ -167,7 +213,10 @@
 			}
 			return 0;
 		});
-	});
+	}
+
+	// フィルタ済みストア（リアクティブ）
+	const filteredStores = $derived(filterAndSortStores(analyzedStores));
 
 	// 更新ボタンの処理
 	async function handleRefresh() {
@@ -322,7 +371,7 @@
 	<header class="header">
 		<div class="header-top">
 			<h1>🍽️ Shoptime</h1>
-			<p class="location">📍 {data.location.name}</p>
+			<p class="location">📍 {data.location?.name ?? "Location"}</p>
 		</div>
 
 		<div class="search-container">
@@ -336,8 +385,21 @@
 					bind:value={locationQuery}
 					oninput={handleInput}
 					onkeydown={(e) => {
-						// EnterでMoodが空なら場所検索、あれば両方検索
-						// ここでは簡易的にLocation確定としてMoodSearchと同じ処理に流すか、Autocompleteを待つ
+						if (
+							e.key === "Enter" &&
+							locationQuery.trim().length > 0
+						) {
+							// Close predictions
+							showPredictions = false;
+							// Force navigation to text search
+							const drunkParam = isDrinkingMode ? "&drunk=1" : "";
+							goto(
+								`/?q=${encodeURIComponent(locationQuery)}${drunkParam}`,
+								{
+									invalidateAll: true,
+								},
+							);
+						}
 					}}
 					onblur={handleBlur}
 				/>
@@ -431,17 +493,7 @@
 		<div class="stores-section">
 			<h2 class="section-title">現在営業中のおすすめ</h2>
 
-			{#if filteredStores.length === 0}
-				<div class="no-results">
-					<p>該当する店舗が見つかりませんでした</p>
-					<button
-						class="reset-btn"
-						onclick={() => (selectedCategory = "すべて")}
-					>
-						フィルターをリセット
-					</button>
-				</div>
-			{:else}
+			{#if filteredStores && filteredStores.length > 0}
 				<!-- Sort Controls -->
 				<div class="sort-controls">
 					<button
@@ -469,96 +521,151 @@
 
 				<div class="store-list">
 					{#each filteredStores as store, index}
-						{@const CategoryIcon = getCategoryIcon(store.category)}
-						{@const isExpanded = expandedStoreId === store.id}
+						{#if store}
+							{@const CategoryIcon = getCategoryIcon(
+								store?.category || "その他",
+							)}
+							{@const isExpanded = expandedStoreId === store?.id}
 
-						<!-- svelte-ignore a11y_click_events_have_key_events -->
-						<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-						<article
-							class="store-card"
-							class:expanded={isExpanded}
-							onclick={() => toggleExpand(store.id)}
-							style="animation-delay: {index * 100}ms"
-						>
-							<!-- Hero Image Section -->
-							<div class="card-image-container">
-								{#if store.photoName}
-									<img
-										src={`/api/photo?name=${store.photoName}&maxWidthPx=600&maxHeightPx=400`}
-										alt={store.name}
-										class="store-image"
-										loading="lazy"
-									/>
-									<div class="image-overlay"></div>
-								{:else}
-									<div class="store-image-placeholder">
-										<span class="placeholder-icon">☕️</span>
-									</div>
-								{/if}
-
-								<!-- Floating Badges -->
-								{#if store.formattedDistance}
-									<div class="badge-floating badge-distance">
-										📍 {store.formattedDistance}
-									</div>
-								{/if}
-
-								<div class="badge-floating badge-status">
-									{#if store.closingTimeMinutes >= 120}
-										<span class="status-late"
-											>🌙 深夜営業</span
-										>
+							<!-- svelte-ignore a11y_click_events_have_key_events -->
+							<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+							<!-- Store Card -->
+							<article
+								class="store-card"
+								class:expanded={isExpanded}
+								onclick={() =>
+									store?.id && toggleExpand(store.id)}
+								style="animation-delay: {index * 50}ms"
+							>
+								<!-- 1. Hero Image Section (No Overlay Text) -->
+								<div class="card-image-container">
+									{#if store?.photoName}
+										<img
+											src={`/api/photo?name=${store.photoName}&maxWidthPx=600&maxHeightPx=400`}
+											alt={store?.name || "Store"}
+											class="store-image"
+											loading="lazy"
+										/>
+										<div
+											class="image-overlay-gradient"
+										></div>
 									{:else}
-										<span class="status-closing"
-											>あと{Math.floor(
-												store.closingTimeMinutes / 60,
-											)}h {store.closingTimeMinutes %
-												60}m</span
-										>
+										<div class="store-image-placeholder">
+											<span class="placeholder-icon"
+												>☕️</span
+											>
+										</div>
 									{/if}
-								</div>
 
-								<!-- Overlay Content (Bottom of Image) -->
-								<div class="card-overlay-content">
-									<h3 class="store-name-overlay">
-										{store.name}
-									</h3>
-									<span class="category-pill-overlay"
-										>{store.category}</span
-									>
-								</div>
-							</div>
+									<!-- Floating Badges -->
+									{#if store?.formattedDistance}
+										<div
+											class="badge-floating badge-distance"
+										>
+											📍 {store.formattedDistance}
+										</div>
+									{/if}
 
-							<!-- Card Body (Below Image) -->
-							<div class="card-body">
-								<!-- AI Score Row -->
-								<div class="score-row">
-									<div class="ai-score-container">
-										<span class="label">AIスコア</span>
-										{#if store.alcohol_status === "分析中..."}
-											<div class="waveform small">
-												<div class="waveform-bar"></div>
-												<div class="waveform-bar"></div>
-												<div class="waveform-bar"></div>
-											</div>
+									<div class="badge-floating badge-status">
+										{#if (store?.closingTimeMinutes || 0) >= 120}
+											<span class="status-late"
+												>🌙 深夜営業</span
+											>
 										{:else}
-											<div class="score-display">
-												<span class="star">★</span>
-												<span class="value"
-													>{store.score?.toFixed(1) ||
-														"3.0"}</span
-												>
-											</div>
+											<span class="status-closing"
+												>あと{Math.floor(
+													(store?.closingTimeMinutes ||
+														0) / 60,
+												)}h {(store?.closingTimeMinutes ||
+													0) % 60}m</span
+											>
+										{/if}
+									</div>
+								</div>
+
+								<!-- Card Body -->
+								<div class="card-body">
+									<!-- 2. Store Name (Hero) -->
+									<h3 class="store-name-hero">
+										{store?.name || "読み込み中..."}
+									</h3>
+
+									<!-- 3. Google Rating (Hero Design) -->
+									<div class="rating-hero-row">
+										<div class="stars-hero">
+											{"★".repeat(
+												Math.round(
+													store?.googleRating ||
+														store?.rating ||
+														0,
+												),
+											) +
+												"☆".repeat(
+													5 -
+														Math.round(
+															store?.googleRating ||
+																store?.rating ||
+																0,
+														),
+												)}
+										</div>
+										<span class="rating-val-hero">
+											{store?.googleRating ||
+												store?.rating ||
+												"N/A"}
+										</span>
+										<span class="rating-cnt-hero">
+											({store?.userRatingsTotal ||
+												store?.reviewCount ||
+												0}件)
+										</span>
+									</div>
+
+									<!-- 4. Tags -->
+									<div class="tags-row">
+										<span class="genre-pill"
+											>{store?.category ||
+												"カテゴリ不明"}</span
+										>
+										{#if store?.alcohol_status && store.alcohol_status !== "分析中..."}
+											<span class="tag-pill alcohol"
+												>🍺 {store.alcohol_status}</span
+											>
+										{/if}
+										{#if store?.hero_feature}
+											<span class="tag-pill feature"
+												>✨ {store.hero_feature}</span
+											>
 										{/if}
 									</div>
 
-									<!-- Compact Action Buttons -->
+									<!-- 5. Comment (AI or Summary) -->
+									<div class="comment-section">
+										<p class="store-comment">
+											{#if store?.ai_insight}
+												{@html store.ai_insight
+													.split("\n")[0]
+													.substring(0, 80) + "..."}
+											{:else if store?.editorialSummary}
+												{store.editorialSummary}
+											{:else if store?.editorial_summary}
+												{store.editorial_summary}
+											{:else}
+												<span class="no-comment"
+													>詳細情報はGoogle
+													Mapsで確認できます</span
+												>
+											{/if}
+										</p>
+									</div>
+
+									<!-- Action Buttons (Compact) -->
 									<div class="action-buttons-compact">
 										<a
-											href={store.phoneNumber
+											href={store?.phoneNumber
 												? `tel:${store.phoneNumber}`
 												: undefined}
-											class="action-btn-compact call-btn {store.phoneNumber
+											class="action-btn-compact call-btn {store?.phoneNumber
 												? ''
 												: 'disabled'}"
 											onclick={(e) => e.stopPropagation()}
@@ -567,12 +674,12 @@
 											<span class="btn-text">電話</span>
 										</a>
 										<a
-											href={store.reservationUrl
+											href={store?.reservationUrl
 												? store.reservationUrl
 												: undefined}
 											target="_blank"
 											rel="noopener noreferrer"
-											class="action-btn-compact reserve-btn {store.reservationUrl
+											class="action-btn-compact reserve-btn {store?.reservationUrl
 												? ''
 												: 'disabled'}"
 											onclick={(e) => e.stopPropagation()}
@@ -581,196 +688,87 @@
 											<span class="btn-text">予約</span>
 										</a>
 									</div>
-								</div>
-							</div>
 
-							<!-- Details: Expanded -->
-							{#if isExpanded}
-								<div
-									class="card-details"
-									transition:slide={{ duration: 300 }}
-								>
-									<div class="details-content">
-										<!-- Map Button -->
-										<a
-											href={store.googleMapsUri}
-											target="_blank"
-											rel="noopener noreferrer"
-											class="map-btn"
-											onclick={(e) => e.stopPropagation()}
+									<!-- Expanded Details -->
+									{#if isExpanded}
+										<div
+											class="card-details"
+											transition:slide={{ duration: 300 }}
 										>
-											<MapPin size={16} />
-											Google Mapsで見る
-										</a>
+											<div class="details-content">
+												<a
+													href={store?.googleMapsUri}
+													target="_blank"
+													rel="noopener noreferrer"
+													class="map-btn"
+													onclick={(e) =>
+														e.stopPropagation()}
+												>
+													<MapPin size={16} />
+													Google Mapsで見る
+												</a>
+												<p class="address">
+													📍 {store?.address || ""}
+												</p>
 
-										<p class="address">
-											📍 {store.address}
-										</p>
-
-										<div class="ai-section">
-											<div class="ai-badge-row">
-												<!-- Hero feature or Loading -->
-												{#if isAnalyzing}
+												<!-- Full AI Comment if expanded -->
+												{#if store?.ai_insight && !isAnalyzing}
 													<div
-														class="hero-feature-skeleton"
+														class="ai-full-comment"
 													>
-														<div class="waveform">
-															<div
-																class="waveform-bar"
-															></div>
-															<div
-																class="waveform-bar"
-															></div>
-															<div
-																class="waveform-bar"
-															></div>
-														</div>
-														<span
-															class="skeleton-text"
-															style="margin-left: 8px;"
-															>{loadingMessage}</span
+														<span class="ai-label"
+															>AI解説:</span
 														>
-													</div>
-												{:else if store.hero_feature}
-													<div class="hero-feature">
-														<span class="icon"
-															>✨</span
-														>
-														<span
-															>{store.hero_feature}</span
-														>
+														<p>
+															{@html store.ai_insight.replace(
+																/\n/g,
+																"<br/>",
+															)}
+														</p>
 													</div>
 												{/if}
-											</div>
 
-											<div class="ai-content">
-												{#if isAnalyzing}
+												{#if store?.recommendedMenu && store.recommendedMenu.length > 0}
 													<div
-														class="ai-insight-skeleton"
+														class="recommended-menu-box"
 													>
-														<div
-															class="line short"
-														></div>
-														<div
-															class="line long"
-														></div>
-														<div
-															class="line medium"
-														></div>
+														<span class="label"
+															>人気:</span
+														>
+														<span class="menu-text">
+															{Array.isArray(
+																store.recommendedMenu,
+															)
+																? store.recommendedMenu.join(
+																		"・",
+																	)
+																: store.recommendedMenu}
+														</span>
 													</div>
-												{:else}
-													{#if store.alcohol_status && store.alcohol_status !== "分析中..."}
-														<div
-															class="alcohol-highlight"
-														>
-															<span
-																class="highlight-icon"
-																>🏷️</span
-															>
-															<span
-																class="highlight-text"
-																>{store.alcohol_status}</span
-															>
-														</div>
-													{/if}
-
-													<p class="ai-insight">
-														{store.ai_insight ||
-															"分析データがありません"}
-													</p>
-
-													{#if store.tags && store.tags.length > 0}
-														<div class="ai-tags">
-															{#each store.tags as tag}
-																<span
-																	class="ai-tag"
-																	>{tag}</span
-																>
-															{/each}
-														</div>
-													{/if}
-
-													{#if store.recommendedMenu}
-														<div
-															class="recommended-menu-box shine-effect"
-														>
-															<span class="label"
-																>必食:</span
-															>
-															<span
-																class="menu-name"
-																>{store.recommendedMenu}</span
-															>
-														</div>
-													{/if}
-
-													{#if store.alcohol_note}
-														<div
-															class="alcohol-note-box"
-														>
-															<span class="icon"
-																>🍷</span
-															>
-															<span
-																>{store.alcohol_note}</span
-															>
-														</div>
-													{/if}
-												{/if}
-											</div>
-
-											<!-- Action Buttons -->
-											<div class="action-buttons">
-												{#if store.phoneNumber}
-													<a
-														href="tel:{store.phoneNumber}"
-														class="action-btn phone"
-													>
-														<span class="icon"
-															>📞</span
-														>
-														電話
-													</a>
-												{/if}
-
-												{#if store.reservationUrl}
-													<a
-														href={store.reservationUrl}
-														target="_blank"
-														rel="noopener noreferrer"
-														class="action-btn reserve"
-													>
-														<span class="icon"
-															>📅</span
-														>
-														予約
-													</a>
-												{:else}
-													<a
-														href={store.googleMapsUri}
-														target="_blank"
-														rel="noopener noreferrer"
-														class="action-btn map"
-													>
-														<span class="icon"
-															>🗺️</span
-														>
-														地図
-													</a>
 												{/if}
 											</div>
 										</div>
-									</div>
+									{/if}
 								</div>
-							{/if}
-						</article>
+							</article>
+						{/if}
+						<!-- End store check -->
 					{/each}
+				</div>
+			{:else}
+				<div class="no-results">
+					<p>該当する店舗が見つかりませんでした</p>
+					<button
+						class="reset-btn"
+						onclick={() => (selectedCategory = "すべて")}
+					>
+						フィルターをリセット
+					</button>
 				</div>
 			{/if}
 		</div>
 	</div>
 </div>
-```
 
 <style>
 	:global(body) {
@@ -905,10 +903,6 @@
 
 	.prediction-item:hover {
 		background: #f9fafb;
-	}
-
-	input:checked ~ .mode-text {
-		color: #ec4899;
 	}
 
 	/* Action Buttons */
@@ -1064,22 +1058,6 @@
 		margin-bottom: 0.25rem;
 	}
 
-	.section-title {
-		font-size: 1.25rem;
-		font-weight: 800;
-		color: #1f2937;
-		margin-bottom: 1rem;
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-	}
-
-	.section-subtitle {
-		font-size: 0.85rem;
-		color: #6b7280;
-		font-weight: normal;
-	}
-
 	/* Store Card */
 	.section-title {
 		font-size: 1.25rem;
@@ -1230,19 +1208,9 @@
 		grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
 	}
 
-	/* Header */
-	.header {
-		background: rgba(255, 255, 255, 0.6);
-		backdrop-filter: blur(12px);
-		padding: 1rem 1.5rem;
-		border-bottom: 1px solid rgba(229, 231, 235, 0.5);
-		position: sticky;
-		top: 0;
-		z-index: 50;
-	}
-
+	/* Store Card */
 	.store-card {
-		background: rgba(255, 255, 255, 0.85); /* Slightly more opaque */
+		background: rgba(255, 255, 255, 0.9);
 		backdrop-filter: blur(16px);
 		border-radius: 16px;
 		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
@@ -1250,12 +1218,359 @@
 		overflow: hidden;
 		transition:
 			transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1),
-			box-shadow 0.3s ease; /* Bouncy transition */
+			box-shadow 0.3s ease;
 		cursor: pointer;
-
-		/* Entry Animation */
 		opacity: 0;
 		animation: fadeInUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+		display: flex;
+		flex-direction: column;
+	}
+
+	.store-card:hover {
+		transform: translateY(-4px) scale(1.01);
+		box-shadow: 0 12px 24px rgba(0, 92, 155, 0.12);
+		border-color: #bfdbfe;
+		background: rgba(255, 255, 255, 0.98);
+	}
+
+	.store-card.expanded {
+		background: #ffffff;
+		box-shadow: 0 16px 40px rgba(0, 92, 155, 0.15);
+		border-color: #005c9b;
+		transform: translateY(-2px);
+		z-index: 10;
+	}
+
+	/* Image Section */
+	.card-image-container {
+		position: relative;
+		height: 200px;
+		width: 100%;
+		overflow: hidden;
+	}
+
+	.store-image {
+		width: 100%;
+		height: 100%;
+		object-fit: cover;
+		transition: transform 0.5s ease;
+	}
+
+	.store-card:hover .store-image {
+		transform: scale(1.05);
+	}
+
+	.image-overlay-gradient {
+		position: absolute;
+		bottom: 0;
+		left: 0;
+		right: 0;
+		height: 40%;
+		background: linear-gradient(to top, rgba(0, 0, 0, 0.4), transparent);
+		pointer-events: none;
+	}
+
+	.store-image-placeholder {
+		width: 100%;
+		height: 100%;
+		background: #e5e7eb;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+	}
+
+	.placeholder-icon {
+		font-size: 3rem;
+		opacity: 0.5;
+	}
+
+	/* Card Body */
+	.card-body {
+		padding: 16px;
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+	}
+
+	/* Hero Details */
+	.store-name-hero {
+		margin: 0 0 4px 0;
+		font-size: 1.3rem;
+		font-weight: 800;
+		line-height: 1.3;
+		color: #111827;
+	}
+
+	.rating-hero-row {
+		display: flex;
+		align-items: flex-end;
+		gap: 8px;
+		margin-bottom: 10px;
+	}
+
+	.stars-hero {
+		color: #f59e0b;
+		font-size: 1.4rem;
+		line-height: 1;
+		letter-spacing: -2px;
+	}
+
+	.rating-val-hero {
+		font-weight: 800;
+		font-size: 1.3rem;
+		color: #111827;
+		line-height: 1;
+	}
+
+	.rating-cnt-hero {
+		font-size: 0.8rem;
+		color: #6b7280;
+		padding-bottom: 2px;
+	}
+
+	/* Tags */
+	.tags-row {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		margin-bottom: 12px;
+	}
+
+	.genre-pill {
+		background: #f3f4f6;
+		color: #4b5563;
+		font-size: 0.75rem;
+		padding: 3px 8px;
+		border-radius: 4px;
+		font-weight: 600;
+	}
+
+	.tag-pill {
+		font-size: 0.75rem;
+		padding: 3px 8px;
+		border-radius: 4px;
+		font-weight: 500;
+	}
+
+	.tag-pill.alcohol {
+		background: #eff6ff;
+		color: #1d4ed8;
+	}
+
+	.tag-pill.feature {
+		background: #fdf2f8;
+		color: #db2777;
+	}
+
+	/* Comment */
+	.comment-section {
+		margin-bottom: 16px;
+		min-height: 2.4em;
+	}
+
+	.store-comment {
+		font-size: 0.9rem;
+		color: #4b5563;
+		line-height: 1.5;
+		margin: 0;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+
+	.no-comment {
+		font-size: 0.8rem;
+		color: #9ca3af;
+		font-style: italic;
+	}
+
+	/* Action Buttons Compact */
+	.action-buttons-compact {
+		display: flex;
+		gap: 0.5rem;
+		margin-top: auto;
+	}
+
+	.action-btn-compact {
+		flex: 1;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		gap: 0.25rem;
+		height: 36px;
+		border-radius: 8px;
+		font-weight: 600;
+		font-size: 0.85rem;
+		text-decoration: none;
+		transition:
+			transform 0.2s,
+			background-color 0.2s;
+	}
+
+	.action-btn-compact .icon {
+		font-size: 1rem;
+	}
+
+	.call-btn {
+		background: #f0f9ff;
+		color: #0284c7;
+		border: 1px solid #e0f2fe;
+	}
+
+	.reserve-btn {
+		background: #005c9b;
+		color: white;
+		box-shadow: 0 2px 4px rgba(0, 92, 155, 0.2);
+	}
+
+	.action-btn-compact:active {
+		transform: scale(0.98);
+	}
+
+	.action-btn-compact.disabled {
+		background: #f3f4f6;
+		color: #9ca3af;
+		border-color: #e5e7eb;
+		box-shadow: none;
+		pointer-events: none;
+		opacity: 0.6;
+	}
+
+	/* Card Details (Expanded) */
+	.card-details {
+		background: #f9fafb;
+		border-top: 1px solid #e5e7eb;
+		margin-top: 12px;
+		border-radius: 0 0 16px 16px;
+	}
+
+	.details-content {
+		padding: 1.25rem;
+	}
+
+	.map-btn {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		color: #005c9b;
+		text-decoration: none;
+		font-size: 0.9rem;
+		font-weight: 500;
+		margin-bottom: 0.5rem;
+	}
+
+	.map-btn:hover {
+		text-decoration: underline;
+	}
+
+	.address {
+		margin: 0 0 1rem 0;
+		font-size: 0.85rem;
+		color: #6b7280;
+	}
+
+	/* AI Full Comment */
+	.ai-full-comment {
+		background: white;
+		padding: 12px;
+		border-radius: 8px;
+		border: 1px solid #e5e7eb;
+		margin-bottom: 12px;
+	}
+
+	.ai-label {
+		display: block;
+		font-size: 0.75rem;
+		font-weight: 700;
+		color: #005c9b;
+		margin-bottom: 4px;
+	}
+
+	.ai-full-comment p {
+		margin: 0;
+		font-size: 0.9rem;
+		line-height: 1.6;
+		color: #374151;
+	}
+
+	.recommended-menu-box {
+		background: #fff;
+		padding: 8px 12px;
+		border-radius: 6px;
+		display: flex;
+		gap: 8px;
+		border: 1px solid #e5e7eb;
+		font-size: 0.85rem;
+	}
+
+	.recommended-menu-box .label {
+		color: #005c9b;
+		font-weight: 700;
+		white-space: nowrap;
+	}
+
+	.alcohol-highlight {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		margin-bottom: 8px;
+		font-size: 0.85rem;
+		color: #1d4ed8;
+	}
+
+	/* Floating Badges */
+	.badge-floating {
+		position: absolute;
+		top: 12px;
+		z-index: 10;
+		background: rgba(255, 255, 255, 0.95);
+		backdrop-filter: blur(4px);
+		padding: 4px 8px;
+		border-radius: 20px;
+		font-size: 0.75rem;
+		font-weight: 600;
+		box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+	}
+
+	.badge-distance {
+		left: 12px;
+		color: #4b5563;
+	}
+
+	.badge-status {
+		right: 12px;
+	}
+
+	.status-late {
+		color: #5b21b6;
+	}
+
+	.status-closing {
+		color: #b91c1c;
+	}
+
+	/* Animations */
+	@keyframes fadeInUp {
+		from {
+			opacity: 0;
+			transform: translateY(20px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
+	@keyframes fadeText {
+		from {
+			opacity: 0;
+			transform: translateY(2px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
 	}
 
 	.store-card:hover {
@@ -1311,6 +1626,8 @@
 		border-radius: 8px;
 		padding: 1rem;
 	}
+
+	/* Removed .ai-score-container and .waveform as requested */
 
 	.ai-badge-row {
 		display: flex;
@@ -1419,17 +1736,6 @@
 		animation: fadeText 0.5s ease-in-out;
 	}
 
-	.progress-bar {
-		position: absolute;
-		bottom: 0;
-		left: 0;
-		height: 3px;
-		background: #005c9b;
-		width: 30%;
-		animation: shimmer 1.5s infinite linear;
-		opacity: 0.5;
-	}
-
 	.ai-insight-skeleton {
 		display: flex;
 		flex-direction: column;
@@ -1475,51 +1781,6 @@
 		}
 	}
 
-	/* Waveform Animation */
-	.waveform {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		gap: 3px;
-		height: 20px;
-	}
-
-	.waveform-bar {
-		width: 3px;
-		background: #005c9b;
-		border-radius: 99px;
-		animation: wave 1s ease-in-out infinite;
-	}
-
-	.waveform-bar:nth-child(1) {
-		animation-delay: 0s;
-		height: 60%;
-	}
-	.waveform-bar:nth-child(2) {
-		animation-delay: 0.1s;
-		height: 100%;
-	}
-	.waveform-bar:nth-child(3) {
-		animation-delay: 0.2s;
-		height: 80%;
-	}
-	.waveform-bar:nth-child(4) {
-		animation-delay: 0.3s;
-		height: 50%;
-	}
-
-	@keyframes wave {
-		0%,
-		100% {
-			transform: scaleY(0.5);
-			opacity: 0.6;
-		}
-		50% {
-			transform: scaleY(1);
-			opacity: 1;
-		}
-	}
-
 	/* Shine Effect */
 	.shine-effect {
 		position: relative;
@@ -1555,51 +1816,7 @@
 		}
 	}
 
-	/* Card Redesign */
-	.store-card {
-		background: #ffffff;
-		border-radius: 16px;
-		box-shadow: 0 4px 6px rgba(0, 0, 0, 0.04);
-		overflow: hidden;
-		transition:
-			transform 0.2s,
-			box-shadow 0.2s;
-		border: 1px solid #f3f4f6;
-		display: flex;
-		flex-direction: column;
-	}
-
-	.store-card:active {
-		transform: scale(0.99);
-	}
-
-	.card-image-container {
-		position: relative;
-		height: 200px;
-		width: 100%;
-		background-color: #e5e7eb;
-	}
-
-	.store-image {
-		width: 100%;
-		height: 100%;
-		object-fit: cover;
-	}
-
-	.store-image-placeholder {
-		width: 100%;
-		height: 100%;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		background: linear-gradient(135deg, #e0f2fe 0%, #f3e8ff 100%);
-	}
-
-	.placeholder-icon {
-		font-size: 3rem;
-		opacity: 0.5;
-	}
-
+	/* Image Overlay */
 	.image-overlay {
 		position: absolute;
 		bottom: 0;
@@ -1638,11 +1855,11 @@
 	}
 
 	.status-late {
-		color: #5b21b6; /* darker violet */
+		color: #5b21b6;
 	}
 
 	.status-closing {
-		color: #b91c1c; /* red */
+		color: #b91c1c;
 	}
 
 	/* Overlay Content */
@@ -1652,60 +1869,31 @@
 		left: 16px;
 		right: 16px;
 		z-index: 10;
-		color: white;
-		text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+		color: white; /* Important: White Text */
+		text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5); /* Strong shadow for readability */
 	}
 
 	.store-name-overlay {
 		margin: 0;
-		font-size: 1.25rem;
-		font-weight: 700;
-		line-height: 1.3;
+		font-size: 1.4rem;
+		font-weight: 800;
+		line-height: 1.2;
 		margin-bottom: 4px;
 	}
 
 	.category-pill-overlay {
 		display: inline-block;
 		font-size: 0.75rem;
-		opacity: 0.9;
-		background: rgba(255, 255, 255, 0.2);
+		opacity: 0.95;
+		background: rgba(255, 255, 255, 0.25);
 		padding: 2px 8px;
 		border-radius: 4px;
+		border: 1px solid rgba(255, 255, 255, 0.4);
 		backdrop-filter: blur(4px);
 	}
-
 	/* Card Body */
 	.card-body {
 		padding: 16px;
-	}
-
-	.score-row {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 12px;
-	}
-
-	.ai-score-container {
-		display: flex;
-		flex-direction: column;
-		align-items: flex-start;
-		gap: 2px;
-	}
-
-	.ai-score-container .label {
-		font-size: 0.7rem;
-		color: #6b7280;
-		font-weight: 600;
-	}
-
-	.ai-score-container .score-display {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		color: #f59e0b;
-		font-weight: 700;
-		font-size: 1.2rem;
 	}
 
 	/* Action Buttons Compact (Already defined but tweaking for new layout) */
@@ -1795,7 +1983,6 @@
 		transform: scale(0.98);
 	}
 
-	.action-btn.disabled,
 	.action-btn-compact.disabled {
 		background: #f3f4f6;
 		color: #9ca3af;

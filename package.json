@@ -25,6 +25,7 @@
 	},
 	"dependencies": {
 		"@google/generative-ai": "^0.24.1",
+		"@notionhq/client": "^5.9.0",
 		"@tailwindcss/postcss": "^4.1.18",
 		"groq-sdk": "^0.37.0",
 		"lucide-svelte": "^0.563.0"

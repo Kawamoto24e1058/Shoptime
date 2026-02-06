@@ -41,6 +41,7 @@ export const load: PageServerLoad = async ({ url }) => {
             } else {
                 console.warn(`Location not found for: ${q}`);
                 locationName = `"${q}" が見つかりませんでした`;
+                // Consider setting default lat/lng if geocoding fails, or keep default
             }
         }
 
@@ -53,7 +54,7 @@ export const load: PageServerLoad = async ({ url }) => {
         return {
             stores: basicStores,
             streamed: {
-                aiAnalyses: fillAIAnalysis(basicStores, originalPlaces, isDrinkingMode)
+                aiAnalyses: fillAIAnalysis(basicStores, originalPlaces, isDrinkingMode, locationName)
             },
             location: {
                 name: locationName,
@@ -73,8 +74,8 @@ export const load: PageServerLoad = async ({ url }) => {
             },
             location: {
                 name: 'エラーが発生しました',
-                latitude: 34.4503,
-                longitude: 135.4526
+                lat: 34.4503,
+                lng: 135.4526
             },
             success: false,
             error: error instanceof Error ? error.message : 'Unknown error occurred'
